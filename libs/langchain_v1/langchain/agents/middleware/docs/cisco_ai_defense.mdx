@@ -1,0 +1,238 @@
+# Cisco AI Defense
+
+> Inspect LLM and tool traffic against Cisco AI Defense security policies
+
+[Cisco AI Defense](https://developer.cisco.com/docs/ai-defense/overview/) provides runtime security inspection for AI applications. The LangChain middleware integration lets you scan LLM inputs/outputs and tool calls for policy violations — including prompt injection, jailbreaks, PII leakage, and unsafe tool usage — directly within the agent loop.
+
+Two middleware classes are available and can be used independently or together:
+
+| Middleware | Hooks | What it inspects |
+| --- | --- | --- |
+| [`CiscoAIDefenseMiddleware`](#llm-inspection) | `before_model` / `after_model` | LLM inputs and outputs |
+| [`CiscoAIDefenseToolMiddleware`](#tool-inspection) | `wrap_tool_call` | Tool call arguments and results |
+
+## Prerequisites
+
+Install the Cisco AI Defense SDK (optional dependency, lazy-imported):
+
+```bash
+pip install aidefense
+```
+
+You'll need a Cisco AI Defense API key. See the [AI Defense quickstart](https://developer.cisco.com/docs/ai-defense/quickstart/) for setup instructions.
+
+## LLM inspection
+
+Inspect user messages before the model call and AI responses after the model call using the Cisco AI Defense Chat Inspection API.
+
+LLM inspection is useful for the following:
+
+- Detecting prompt injection and jailbreak attempts in user input.
+- Scanning AI responses for PII leakage, toxic content, or policy violations.
+- Enforcing organizational security policies on all LLM interactions.
+
+API reference: [`CiscoAIDefenseMiddleware`](https://reference.langchain.com/python/langchain/agents/middleware/cisco_ai_defense/CiscoAIDefenseMiddleware)
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import CiscoAIDefenseMiddleware
+
+agent = create_agent(
+    model="openai:gpt-4.1",
+    tools=[your_search_tool],
+    middleware=[
+        CiscoAIDefenseMiddleware(
+            api_key="your-cisco-ai-defense-api-key",
+            region="us",
+            check_input=True,
+            check_output=True,
+        ),
+    ],
+)
+```
+
+### How it works
+
+1. **Before model call** (`before_model`): The middleware converts the conversation messages to the AI Defense format and sends them to the Chat Inspection API. If the API flags the content as unsafe, the middleware either jumps to the end node with a violation message (`exit_behavior="end"`) or raises a `CiscoAIDefenseError` (`exit_behavior="error"`).
+
+2. **After model call** (`after_model`): The middleware inspects the full conversation (including the AI's response) through the same API. Unsafe outputs are handled identically to unsafe inputs.
+
+### Configuration options
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `api_key` | `str` | *required* | Cisco AI Defense API key. |
+| `region` | `str` | `"us"` | AI Defense region. Short aliases `"us"`, `"eu"`, `"apj"` are accepted and normalized automatically (e.g., `"us"` → `"us-west-2"`). |
+| `check_input` | `bool` | `True` | Inspect user messages before the model call. |
+| `check_output` | `bool` | `True` | Inspect AI messages after the model call. |
+| `exit_behavior` | `"end"` \| `"error"` | `"end"` | `"end"` jumps to the end node with a violation message. `"error"` raises `CiscoAIDefenseError`. |
+| `fail_open` | `bool` | `True` | When `True`, allow the request if the inspection API is unreachable. When `False`, propagate the error. |
+| `timeout` | `int` | `30` | Inspection API timeout in seconds. |
+
+### Input-only or output-only inspection
+
+You can selectively enable input or output inspection:
+
+```python
+# Only inspect user input (skip output scanning)
+CiscoAIDefenseMiddleware(
+    api_key="...",
+    check_input=True,
+    check_output=False,
+)
+
+# Only inspect AI output (skip input scanning)
+CiscoAIDefenseMiddleware(
+    api_key="...",
+    check_input=False,
+    check_output=True,
+)
+```
+
+## Tool inspection
+
+Inspect tool call arguments before execution and tool results after execution using the Cisco AI Defense MCP Inspection API. This covers all tool types uniformly — `@tool` functions, MCP tools, and any tool executed through the agent's tool node.
+
+Tool inspection is useful for the following:
+
+- Blocking unsafe tool arguments (e.g., SQL injection in database queries).
+- Scanning tool results for sensitive data before returning them to the model.
+- Enforcing security policies on MCP server interactions.
+
+API reference: [`CiscoAIDefenseToolMiddleware`](https://reference.langchain.com/python/langchain/agents/middleware/cisco_ai_defense/CiscoAIDefenseToolMiddleware)
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import CiscoAIDefenseToolMiddleware
+
+agent = create_agent(
+    model="openai:gpt-4.1",
+    tools=[your_database_tool, your_file_tool],
+    middleware=[
+        CiscoAIDefenseToolMiddleware(
+            api_key="your-cisco-ai-defense-api-key",
+            region="us",
+            inspect_requests=True,
+            inspect_responses=True,
+        ),
+    ],
+)
+```
+
+### How it works
+
+1. **Before tool execution**: The middleware sends the tool name and arguments to the MCP Inspection API. If the request is flagged as unsafe, the middleware returns a blocking `ToolMessage` (`exit_behavior="end"`) or raises a `CiscoAIDefenseError` (`exit_behavior="error"`), and the tool is never executed.
+
+2. **After tool execution**: The middleware sends the tool result to the MCP Inspection API for response scanning. Unsafe results are replaced with a blocking `ToolMessage` or raise an error.
+
+### Configuration options
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `api_key` | `str` | *required* | Cisco AI Defense API key. |
+| `region` | `str` | `"us"` | AI Defense region. Short aliases accepted. |
+| `inspect_requests` | `bool` | `True` | Inspect tool call arguments before execution. |
+| `inspect_responses` | `bool` | `True` | Inspect tool results after execution. |
+| `exit_behavior` | `"end"` \| `"error"` | `"end"` | How to handle violations. |
+| `fail_open` | `bool` | `True` | Allow tool calls when inspection API is unreachable. |
+| `timeout` | `int` | `30` | Inspection API timeout in seconds. |
+
+## Combined LLM + tool inspection
+
+Use both middleware together for comprehensive protection across the entire agent loop:
+
+```python
+from langchain.agents import create_agent
+from langchain.agents.middleware import (
+    CiscoAIDefenseMiddleware,
+    CiscoAIDefenseToolMiddleware,
+)
+
+agent = create_agent(
+    model="openai:gpt-4.1",
+    tools=[your_search_tool, your_database_tool],
+    middleware=[
+        CiscoAIDefenseMiddleware(
+            api_key="your-cisco-ai-defense-api-key",
+            region="us",
+        ),
+        CiscoAIDefenseToolMiddleware(
+            api_key="your-cisco-ai-defense-api-key",
+            region="us",
+        ),
+    ],
+)
+```
+
+This setup inspects:
+
+- User messages **before** the model call (prompt injection, jailbreaks)
+- AI responses **after** the model call (PII leakage, toxic content)
+- Tool arguments **before** execution (injection attacks, unsafe commands)
+- Tool results **after** execution (sensitive data in responses)
+
+## Error handling
+
+### exit_behavior="end" (default)
+
+The middleware jumps to the agent's end node with a descriptive `AIMessage` (for LLM middleware) or returns a blocking `ToolMessage` (for tool middleware). The agent terminates gracefully.
+
+### exit_behavior="error"
+
+The middleware raises `CiscoAIDefenseError`, which you can catch in your application:
+
+```python
+from langchain.agents.middleware.cisco_ai_defense import CiscoAIDefenseError
+
+try:
+    result = agent.invoke({"messages": [HumanMessage("...")]})
+except CiscoAIDefenseError as e:
+    print(f"Blocked at stage: {e.stage}")
+    print(f"Classifications: {e.classifications}")
+```
+
+The error includes:
+
+| Attribute | Type | Description |
+| --- | --- | --- |
+| `stage` | `str` | Where the violation was detected: `"input"`, `"output"`, `"tool_request"`, or `"tool_response"`. |
+| `classifications` | `list[str]` | Policy classifications that triggered the block. |
+| `content` | `str` | The content that was flagged. |
+
+### Fail-open vs. fail-closed
+
+| `fail_open` | Behavior when API is unreachable |
+| --- | --- |
+| `True` (default) | Allow the request through — logs a warning |
+| `False` | Propagate the connection error |
+
+Set `fail_open=False` for strict security environments where you prefer to halt the agent rather than allow uninspected traffic.
+
+## Async support
+
+Both middleware classes support async hooks. Sync hooks use `asyncio.to_thread` internally to avoid blocking the event loop:
+
+```python
+# Works with both sync and async invocation
+result = agent.invoke({"messages": [...]})          # sync
+result = await agent.ainvoke({"messages": [...]})   # async
+```
+
+## Region aliases
+
+Short region aliases are supported for convenience:
+
+| Alias | Resolved region |
+| --- | --- |
+| `"us"` | `"us-west-2"` |
+| `"eu"` | `"eu-central-1"` |
+| `"apj"` | `"ap-northeast-1"` |
+
+You can also pass a full region name directly (e.g., `"us-east-1"`).
+
+## Additional resources
+
+- [Cisco AI Defense documentation](https://developer.cisco.com/docs/ai-defense/overview/)
+- [AI Defense Python SDK (`aidefense`)](https://pypi.org/project/aidefense/)
+- [API reference: CiscoAIDefenseMiddleware](https://reference.langchain.com/python/langchain/agents/middleware/cisco_ai_defense/CiscoAIDefenseMiddleware)
+- [API reference: CiscoAIDefenseToolMiddleware](https://reference.langchain.com/python/langchain/agents/middleware/cisco_ai_defense/CiscoAIDefenseToolMiddleware)
